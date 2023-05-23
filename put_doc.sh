@@ -2,15 +2,19 @@
 
 
  function put_doc {
-   es_idx="$1"
-   
-   while IFS= read -r line
-   do
-     id=$(jq --raw-output '.id' <<< $line)
-     jq 'del(.id)' <<< $line |
-       curl -s -H 'Content-Type: application/json' -XPUT "$es_idx/_doc/$id" -d @- |
-       jq -c '[._id, .result]'
-   done
+     while IFS= read -r line
+     do
+         id=$(jq --raw-output '._id' <<< "$line")
+         method=$([[ -z $id ]] && echo POST || echo PUT)
+         jq '._source' <<< "$line" |
+             curl -s -H 'Content-Type: application/json' -X$method "$1/$id" -d @- |
+             jq -c '[._id, .result]'
+     done
  }
 
-put_doc "$1"
+# $1 is url, eg, localhost:9200/idx/_doc
+if [ -z "$1" ]; then
+    echo "usage: ${0##*/} URL" >&2
+    exit 1
+fi
+ put_doc "$1"

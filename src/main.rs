@@ -3,16 +3,17 @@
  *
  * The Programe is effectively equal to the shell script:
  * ------------------------------------------------------------------------
- * function put_doc {
- *   es_idx="$1"
- *   
- *   while IFS= read -r line
- *   do
- *     id=$(jq --raw-output '.id' <<< $line)
- *     jq 'del(.id)' <<< $line |
- *       curl -s -H 'Content-Type: application/json' -XPUT "$es_idx/_doc/$id" -d @- |
- *       jq -c '[._id, .result]'
- *   done
+ * function put_es_docs {
+ *     # $1 may be es doc path, eg, localhost:9200/idx/_doc
+ *
+ *     while IFS= read -r line
+ *     do
+ *         id=$(jq --raw-output '._id' <<< "$line")
+ *         method=$([[ -z $id ]] && echo POST || echo PUT)
+ *         jq '._source' <<< "$line" |
+ *             curl-json -X$method "$1/$id" -d @- |
+ *             jq -c '[._id, .result]'
+ *     done
  * }
  *
  */
@@ -23,7 +24,7 @@ use std::process;
 use std::io;
 use std::io::{BufRead, Read, /*Write*/};
 use serde_json::{Value};
-use json_value_remove::Remove;
+//use json_value_remove::Remove;
 use curl::easy;
 
 fn basename(s: &str) -> &str {
@@ -42,7 +43,7 @@ fn parse_args() -> String {
         [prog_, .. ] => {
             let prog = basename(prog_);
             println!("usage: {} URL", prog);
-            println!("   eg: {} localhost:9200/cve/_doc", prog);
+            println!("   eg: {} localhost:9200/idx/_doc", prog);
             process::exit(1);
         },
         _ => {
@@ -51,17 +52,23 @@ fn parse_args() -> String {
     }
 }
 
-fn put_doc(url: &String, doc: &String) -> io::Result<()> 
+fn add_doc(is_new: bool, url: &String, doc: &Value) -> io::Result<()> 
 {
-    let mut bytes = doc.as_bytes();
+    let s = doc.to_string();
+    let mut bytes = s.as_bytes();
+    //println!("{} {}\n{}\n", if is_new { "POST"} else {"PUT"}, url, s);
 
     let mut headers = easy::List::new();
     headers.append("Content-Type: application/json")?;
 
     let mut easy = easy::Easy::new();
+    if is_new {
+        easy.post(true)?;  //insert
+    } else {
+        easy.put(true)?;   //update
+    }
     easy.url(url)?;
     easy.http_headers(headers)?;
-    easy.put(true)?;
     easy.post_field_size(bytes.len() as u64)?;
 
     let mut transfer = easy.transfer();
@@ -82,27 +89,33 @@ fn put_doc(url: &String, doc: &String) -> io::Result<()>
 }
 
 fn main() -> io::Result<()> {
+    let id_key = "_id";
+    let data_key = "_source";
+
     let mut url = parse_args();
+    if ! url.ends_with("/") {
+        url.push_str("/");
+    }
     let url_base_len = url.len();
 
     let mut lines = io::stdin().lock().lines();
     while let Some(line) = lines.next() {
-        let mut data = line?;
+        let data = line?;
         if data.len() == 0 {
             continue;
         }
-
-        url.truncate(url_base_len);
+        let json: Value = serde_json::from_str(&data)?;
 
         // etract 'id' and append to url, if any
-        let mut json: Value = serde_json::from_str(&data)?;
-        if let Some(Value::String(id)) = json.remove("/id")? {
-            url.push_str("/");
-            url.push_str(&id);
-            data = json.to_string();  //data without id
+        url.truncate(url_base_len);
+        let is_new = if let Value::String(id) = &json[id_key] {
+            url.push_str(id);
+            false
+        } else {
+            true
         };
 
-        put_doc(&url, &data)?;
+        add_doc(is_new, &url, &json[data_key])?;
     }
 
     Ok(())
